@@ -887,6 +887,19 @@ impl QueuePair {
         Ok(())
     }
 
+    /// submit send request of a slice of local memory regions
+    pub(crate) fn submit_send_sge<'a, LR>(
+        self: &Arc<Self>,
+        lms: &'a [&'a LR],
+        imm: Option<u32>,
+    ) -> QueuePairOpsSubmit<QPSend<'a, LR>>
+    where
+        LR: LocalMrReadAccess,
+    {
+        let send = QPSend::new(lms, imm);
+        QueuePairOpsSubmit::new(Arc::<Self>::clone(self), send, get_lmr_inners(lms))
+    }
+
     /// send a slice of local memory regions
     pub(crate) fn send_sge<'a, LR>(
         self: &Arc<Self>,
@@ -1328,6 +1341,75 @@ impl<Op: QueuePairOp + Unpin> Future for QueuePairOps<Op> {
                     )),
                 })
             }
+        }
+    }
+}
+
+/// Queue pair operation wrapper, return after libv_post_send
+#[derive(Debug)]
+pub(crate) struct QueuePairOpsSubmit<Op: QueuePairOp + Unpin> {
+    /// the internal queue pair
+    qp: Arc<QueuePair>,
+    /// operation state
+    state: QueuePairOpsState,
+    /// the operation
+    op: Option<Op>,
+}
+
+impl<Op: QueuePairOp + Unpin> QueuePairOpsSubmit<Op> {
+    /// Create a new queue QueuePairOpsSubmit wrapper
+    fn new(qp: Arc<QueuePair>, op: Op, inners: LmrInners) -> Self {
+        Self {
+            qp,
+            state: QueuePairOpsState::Init(inners),
+            op: Some(op),
+        }
+    }
+}
+
+impl<Op: QueuePairOp + Unpin> Future for QueuePairOpsSubmit<Op> {
+    type Output = io::Result<tokio::sync::mpsc::Receiver<WorkCompletion>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let s = self.get_mut();
+        match s.state {
+            QueuePairOpsState::Init(ref inners) => {
+                let (wr_id, recv) = s.qp.cq_event_listener.register_for_write(inners)?;
+                s.state = QueuePairOpsState::Submit(wr_id, Some(recv));
+                Pin::new(s).poll(cx)
+            }
+            QueuePairOpsState::Submit(wr_id, ref mut recv) => {
+                let op = s.op.as_mut().unwrap();
+                if let Err(e) = op.submit(&s.qp, wr_id) {
+                    if op.should_resubmit(&e) {
+                        let sleep = Box::pin(sleep(RESUBMIT_DELAY));
+                        s.state = QueuePairOpsState::PendingToResubmit(sleep, wr_id, recv.take());
+                    } else {
+                        tracing::error!("failed to submit the operation");
+                        // TODO: deregister wrid
+                        return Poll::Ready(Err(e));
+                    }
+                } else {
+                    match recv.take().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::Other, "Bug in queue pair op poll")
+                    }) {
+                        Ok(recv) => {
+                            return Poll::Ready(Ok(
+                                recv,
+                                // s.op.take().unwrap(),
+                            ));
+                        }
+                        Err(e) => return Poll::Ready(Err(e)),
+                    }
+                }
+                Pin::new(s).poll(cx)
+            }
+            QueuePairOpsState::PendingToResubmit(ref mut sleep, wr_id, ref mut recv) => {
+                ready!(sleep.poll_unpin(cx));
+                s.state = QueuePairOpsState::Submit(wr_id, recv.take());
+                Pin::new(s).poll(cx)
+            }
+            QueuePairOpsState::Submitted(_) => unreachable!(),
         }
     }
 }

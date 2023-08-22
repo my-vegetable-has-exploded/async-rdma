@@ -690,6 +690,12 @@ impl<'a> LocalMrSliceMut<'a> {
     }
 }
 
+impl<'a> Into<LocalMrSlice<'a>> for LocalMrSliceMut<'a> {
+    fn into(self) -> LocalMrSlice<'a> {
+        LocalMrSlice::new(self.lmr, self.inner, self.addr, self.len)
+    }
+}
+
 impl MrAccess for LocalMrSliceMut<'_> {
     #[inline]
     fn addr(&self) -> usize {

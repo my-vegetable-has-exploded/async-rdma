@@ -1,6 +1,8 @@
+use crate::completion_queue::WorkCompletion;
 use crate::context::Context;
 use crate::hashmap_extension::HashMapExtension;
 use crate::ibv_event_listener::IbvEventListener;
+use crate::memory_region::local::LocalMrSliceMut;
 use crate::queue_pair::MAX_RECV_WR;
 use crate::rmr_manager::RemoteMrManager;
 use crate::RemoteMrReadAccess;
@@ -641,6 +643,48 @@ impl AgentInner {
         self.send_request_append_data(kind, &[], None).await
     }
 
+    // submit a send request with data appended
+    async fn submit_send_request_append_data<'a>(
+        &self,
+        kind: RequestKind,
+        mut header: LocalMrSliceMut<'a>,
+        data: Vec<LocalMrSlice<'a>>,
+        imm: Option<u32>,
+    ) -> io::Result<RequestSubmitted<'a>> {
+        let data_len: usize = data.iter().map(|l| l.length()).sum();
+        assert!(data_len <= self.max_sr_data_len);
+        let (tx, rx) = channel(2);
+        let req_id = self
+            .response_waits
+            .lock()
+            .insert_until_success(tx, AgentRequestId::new);
+        let req = Request {
+            request_id: req_id,
+            kind,
+        };
+        // // SAFETY: ?
+        // // TODO: check safety
+        // let mut header_buf = self
+        //     .allocator
+        //     // alignment 1 is always correct
+        //     .alloc_zeroed_default(unsafe {
+        //         &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1)
+        //     })?;
+        // SAFETY: the mr is writeable here without cancel safety issue
+        let cursor = Cursor::new(unsafe { header.as_mut_slice_unchecked() });
+        let message = Message::Request(req);
+        // FIXME: serialize udpate
+        bincode::serialize_into(cursor, &message)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        // SAFETY: The input range is always valid
+        // let header_buff = unsafe { header.get_unchecked(0..header.length()) };
+        let mut lms: Vec<LocalMrSlice> = vec![header.into()];
+        lms.extend(data);
+        let lms_ref: Vec<&LocalMrSlice> = lms.iter().map(|l| l).collect::<Vec<_>>();
+        let wc_recv = self.qp.submit_send_sge(&lms_ref, imm).await?;
+        Ok(RequestSubmitted { lms, wc_recv, rx })
+    }
+
     /// Send a request with data appended
     async fn send_request_append_data(
         &self,
@@ -968,4 +1012,37 @@ enum Message {
     Request(Request),
     /// Response
     Response(Response),
+}
+
+#[derive(Debug)]
+struct RequestSubmitted<'a> {
+    // /// header buffer
+    // header_buf: LocalMrSlice<'a>,
+    /// lms
+    lms: Vec<LocalMrSlice<'a>>,
+    // /// queue pair ops have been submitted
+    wc_recv: Receiver<WorkCompletion>,
+    /// receiver for the response of the request
+    rx: Receiver<Result<ResponseKind, io::Error>>,
+}
+
+impl RequestSubmitted<'_> {
+    async fn result(mut self) -> io::Result<ResponseKind> {
+        let _ = match self.wc_recv.recv().await {
+            Some(wc) => wc.result().map_err(Into::into),
+            None => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Wc receiver unexpect closed",
+            )),
+        }?;
+        match tokio::time::timeout(RESPONSE_TIMEOUT, self.rx.recv()).await {
+            Ok(resp) => {
+                resp.ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
+            }
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timeout for waiting for a response.",
+            )),
+        }
+    }
 }
