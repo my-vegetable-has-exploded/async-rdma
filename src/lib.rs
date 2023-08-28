@@ -2821,6 +2821,22 @@ impl Rdma {
         Ok(rdma)
     }
 
+    /// register bufs with default access
+    /// warning: this function is not safe, it will cause a new LocalMr who owns the memory chunk, please keep bufs is only copy of this memory chunk yourself.
+    pub unsafe fn register_bytes<Buf: bytes::Buf>(&self, bufs: Buf) -> io::Result<LocalMr> {
+        let addr = bufs.chunk().as_ptr() as usize;
+        let len = bufs.chunk().len();
+        let layout = Layout::from_size_align_unchecked(len, 1);
+        self.register_local_mr(addr, layout)
+    }
+
+    /// register a local memory region with default access
+    /// warning: this function is not safe, it will cause a new LocalMr who owns the memory region, please keep the LocalMr is only copy yourself.
+    pub unsafe fn register_local_mr(&self, addr: usize, layout: Layout) -> io::Result<LocalMr> {
+        self.allocator
+            .register_lmr_default_access(addr, layout, &self.pd)
+    }
+
     /// Allocate a local memory region
     ///
     /// You can use local mr to `send`&`receive` or `read`&`write` with a remote mr.

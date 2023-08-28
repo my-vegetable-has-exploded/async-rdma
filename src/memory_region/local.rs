@@ -494,7 +494,7 @@ impl Drop for LocalMrInner {
                 // SAFETY: ffi
                 unsafe { tikv_jemalloc_sys::free(self.addr as _) }
             }
-            crate::MRManageStrategy::Raw => {
+            crate::MRManageStrategy::Raw | crate::MRManageStrategy::UserDefined => {
                 // SAFETY: The ptr is allocated via this allocator, and the layout is the same layout
                 // that was used to allocate that block of memory.
                 unsafe {

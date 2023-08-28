@@ -123,6 +123,9 @@ pub enum MRManageStrategy {
     Jemalloc,
     /// Alloc raw `MR`
     Raw,
+    /// User alloc `MR` by himself
+    /// TODO may provide a parameter for user to manage dealloc method
+    UserDefined,
 }
 
 /// Memory region allocator
@@ -164,6 +167,7 @@ impl MrAllocator {
                     default_access: mr_attr.access,
                 }
             }
+            MRManageStrategy::UserDefined => todo!(),
         }
     }
 
@@ -289,7 +293,39 @@ impl MrAllocator {
                         Ok(LocalMrInner::new(addr as usize, *layout, raw_mr, self.strategy))
                     })
             },
+            MRManageStrategy::UserDefined => unreachable!(),
         }
+    }
+
+    pub(crate) unsafe fn register_lmr(
+        &self,
+        addr: usize,
+        layout: Layout,
+        access: ibv_access_flags,
+        pd: &Arc<ProtectionDomain>,
+    ) -> io::Result<LocalMrInner> {
+        let raw_mr = Arc::new(RawMemoryRegion::register_from_pd(
+            pd,
+            addr as *mut u8,
+            layout.size(),
+            access,
+        )?);
+        Ok(LocalMrInner::new(
+            addr,
+            layout,
+            raw_mr,
+            MRManageStrategy::UserDefined,
+        ))
+    }
+
+    pub(crate) unsafe fn register_lmr_default_access(
+        &self,
+        addr: usize,
+        layout: Layout,
+        pd: &Arc<ProtectionDomain>,
+    ) -> io::Result<LocalMr> {
+        let inner = self.register_lmr(addr, layout, self.default_access, pd)?;
+        Ok(LocalMr::new(inner))
     }
 }
 
