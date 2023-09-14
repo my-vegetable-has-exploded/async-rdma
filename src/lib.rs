@@ -174,6 +174,7 @@ use cq_event_listener::{CQEventListener, PollingTriggerInput, DEFAULT_CC_EVENT_T
 pub use cq_event_listener::{ManualTrigger, PollingTriggerType};
 use derive_builder::Builder;
 use enumflags2::BitFlags;
+use futures::FutureExt;
 pub use ibv_event_listener::IbvEventType;
 pub use memory_region::{
     local::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess},
@@ -197,7 +198,7 @@ use rmr_manager::DEFAULT_RMR_TIMEOUT;
 use std::ptr::null_mut;
 use std::{alloc::Layout, collections::BTreeMap, fmt::Debug, io, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     sync::{mpsc, Mutex},
 };
@@ -4234,6 +4235,62 @@ impl RCStream {
     /// The parameter `layout` can be obtained by `Layout::new::<Data>()`.
     pub fn alloc_local_mr(&mut self, layout: Layout) -> io::Result<LocalMr> {
         self.inner.alloc_local_mr(layout)
+    }
+}
+
+impl AsyncRead for RCStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let fill_size = buf.capacity();
+        async move {
+            let mut lmr = self.recieve_lmr(fill_size).await?;
+            let mut readed = 0;
+            while let Some(lmr_segment) = lmr.pop() {
+                let lmr_segment_len = lmr_segment.length();
+                buf.put_slice(&lmr_segment.as_slice()[..lmr_segment_len]);
+                readed += lmr_segment_len;
+            }
+            buf.advance(readed);
+            Ok(())
+        }
+        .boxed()
+        .poll_unpin(cx)
+    }
+}
+
+impl AsyncWrite for RCStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        let mut lmr = self
+            .alloc_local_mr(Layout::from_size_align(buf.len(), 1).unwrap())
+            .unwrap();
+        lmr.as_mut_slice().copy_from_slice(buf);
+        async move {
+            self.send_lmr(lmr).await?;
+            Ok(buf.len())
+        }
+        .boxed()
+        .poll_unpin(cx)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
     }
 }
 
