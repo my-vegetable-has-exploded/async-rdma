@@ -19,7 +19,9 @@ use std::{
     ptr,
     sync::Arc,
 };
-use tikv_jemalloc_sys::{self, extent_hooks_t, MALLOCX_ALIGN, MALLOCX_ARENA, MALLOCX_ZERO};
+use tikv_jemalloc_sys::{
+    self, extent_hooks_t, MALLOCX_ALIGN, MALLOCX_ARENA, MALLOCX_TCACHE_NONE, MALLOCX_ZERO,
+};
 use tracing::{debug, error};
 
 /// Get default extent hooks from arena0
@@ -299,15 +301,28 @@ impl MrAllocator {
 ///
 /// This func is safe when `zeroed == true`, otherwise newly allocated memory is uninitialized.
 unsafe fn alloc_from_je(arena_ind: u32, layout: &Layout, flag: i32) -> Option<*mut u8> {
-    let flags = (MALLOCX_ALIGN(layout.align()) | MALLOCX_ARENA(arena_ind.cast()) | flag).cast();
+    let flags = (MALLOCX_ALIGN(layout.align())
+        | MALLOCX_ARENA(arena_ind.cast())
+        | flag
+        | MALLOCX_TCACHE_NONE())
+    .cast();
     debug!(
         "alloc mr from je, arena_ind: {:?}, layout: {:?}, flags: {:?}",
         arena_ind, layout, flags
     );
     let addr = { tikv_jemalloc_sys::mallocx(layout.size(), flags) };
     if addr.is_null() {
+        debug!(
+            "alloc mr unsuccessfully from je, arena_ind: {:?}, layout: {:?}, flags: {:?}",
+            arena_ind, layout, flags
+        );
         None
     } else {
+        debug!(
+            "alloc mr successfully from je, arena_ind: {:?}, addr: {:?}",
+            arena_ind,
+            addr.cast::<u8>() as usize,
+        );
         Some(addr.cast::<u8>())
     }
 }
@@ -487,7 +502,7 @@ unsafe extern "C" fn extent_alloc_hook(
             ptr::null_mut()
         },
         |item| {
-            debug!("alloc item {:?} lkey {}", &item, item.raw_mr.lkey());
+            debug!("register item {:?} lkey {} arena_ind: {}", &item, item.raw_mr.lkey(), arena_ind);
             insert_item(item);
             addr
         },

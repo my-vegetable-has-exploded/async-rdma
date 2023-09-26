@@ -1455,7 +1455,7 @@ impl<Op: QueuePairOp + Unpin> Future for QueuePairOpsSubmit<Op> {
         let s = self.get_mut();
         match s.state {
             QueuePairOpsState::Init(ref inners) => {
-                let (wr_id, recv) = s.qp.cq_event_listener.register_for_write(inners)?;
+                let (wr_id, recv) = s.qp.cq_event_listener.register_for_read(inners)?;
                 s.state = QueuePairOpsState::Submit(wr_id, Some(recv));
                 Pin::new(s).poll(cx)
             }

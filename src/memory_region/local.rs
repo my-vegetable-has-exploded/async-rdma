@@ -541,6 +541,8 @@ impl LocalMr {
     ///         let lmr_half = lmr_half.unwrap();
     ///         assert_eq!(lmr_half.length(), 2048);
     ///         assert_eq!(lmr_half.addr(), start_addr);
+    ///         assert_eq!(lmr.length(), 2048);
+    ///         assert_eq!(lmr.addr(), start_addr+2048);
     ///         let lmr_overbound = lmr.split_to(2049);
     ///         assert!(lmr_overbound.is_none());
     ///         Ok(())
